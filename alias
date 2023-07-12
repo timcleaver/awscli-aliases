@@ -1,5 +1,15 @@
 [toplevel]
 
+# shortcuts
+ag = apigateway
+as = autoscaling
+cfn = cloudformation
+cp = codepipeline
+ddb = dynamodb
+eb = elasticbeanstalk
+ec = elasticache
+sc = servicecatalog
+
 whoami = sts get-caller-identity
 
 create-assume-role =
@@ -17,11 +27,6 @@ create-assume-role =
   }; f
 
 
-running-instances = ec2 describe-instances \
-    --filter Name=instance-state-name,Values=running \
-    --output table \
-    --query 'Reservations[].Instances[].{ID: InstanceId,Hostname: PublicDnsName,Name: Tags[?Key==`Name`].Value | [0],Type: InstanceType, Platform: Platform || `Linux`}'
-
 ebs-volumes= ec2 describe-volumes \
     --query 'Volumes[].{VolumeId: VolumeId,State: State,Size: Size,Name: Tags[0].Value,AZ: AvailabilityZone}' \
     --output table
@@ -29,7 +34,7 @@ ebs-volumes= ec2 describe-volumes \
 amazon-linux-amis = ec2 describe-images \
     --filter \
       Name=owner-alias,Values=amazon \
-      Name=name,Values="amzn-ami-hvm-*" \
+      Name=name,Values="amzn*-ami-hvm-*" \
       Name=architecture,Values=x86_64 \
       Name=virtualization-type,Values=hvm \
       Name=root-device-type,Values=ebs \
@@ -37,11 +42,71 @@ amazon-linux-amis = ec2 describe-images \
     --query "reverse(sort_by(Images, &CreationDate))[*].[ImageId,Name,Description]" \
     --output text
 
-list-sgs = ec2 describe-security-groups --query "SecurityGroups[].[GroupId, GroupName]" --output text
+list-sgs = ec2 describe-security-groups --query "SecurityGroups[].[VpcId, GroupId, GroupName]" --output text 
+
+list-igw = ec2 describe-internet-gateways \
+    --query "InternetGateways[].{IGW:InternetGatewayId,VpcId: Attachments[].VpcId|[0], Name: Tags[?Key=='Name'].Value |[0] }"  \
+    --output table
+
+list-ngw = ec2 describe-nat-gateways \
+    --query "NatGateways[].{VpcId:VpcId, NatGatewayId: NatGatewayId, SubnetId: SubnetId, PublicIp: NatGatewayAddresses[].PublicIp | [0], PrivateIp: NatGatewayAddresses[].PrivateIp | [0] }" \
+    --output table
+
+list-vgw = ec2 describe-vpn-gateways \
+    --query "VpnGateways[].{VpnGatewayId: VpnGatewayId, AmazonSideAsn: AmazonSideAsn, VpcId: VpcAttachments.VpcId,Name: Tags[?Key=='Name'].Value| [0] }" \
+    --output table
+
+list-vpn-connection = ec2 describe-vpn-connections \
+    --query "VpnConnections[].{ VpnConnectionId: VpnConnectionId, CustomerGatewayId:CustomerGatewayId,VpnGatewayId:VpnGatewayId, Name: Tags[?Key=='Name'].Value| [0] }" \
+    --output table
+
+list-instance-status = ec2 describe-instance-status \
+    --query "InstanceStatuses[].{InstanceId: InstanceId, State: InstanceState.Name, AZ: AvailabilityZone, SystemStatus: SystemStatus.Status, InstanceStatus: InstanceStatus.Status}" \
+    --output table
+
+list-vpcs = ec2 describe-vpcs \
+      --query \
+        "Vpcs[].{VpcId: VpcId, CidrBlock: CidrBlock,  Name: Tags[?Key=='Name'].Value| [0], IsDefault: IsDefault}" \
+      --output table 
+
+list-subnets = ec2 describe-subnets \
+    --query "Subnets[].{AZ:AvailabilityZone,VpcId:VpcId,SubnetId:SubnetId,CidrBlock:CidrBlock,    Name: Tags[?Key=='Name'].Value| [0]}" \
+    --output table
+
+list-asg-settings = autoscaling describe-auto-scaling-groups \
+  --query "AutoScalingGroups[].{MDesired:DesiredCapacity, ASGName:AutoScalingGroupName, Min:MinSize, Max:MaxSize, lbname:LoadBalancerNames, LCName:LaunchConfigurationName, HealthCheckType:HealthCheckType}" \
+  --output table   
+
+list-asg-instances = autoscaling describe-auto-scaling-groups \
+  --query "AutoScalingGroups[].Instances[].{id:InstanceId, AZ:AvailabilityZone, HealthStatus:HealthStatus,LifecycleState:LifecycleState }" \
+  --output table
+
+list-aslc = autoscaling describe-launch-configurations \
+  --query "LaunchConfigurations[].{LCName:LaunchConfigurationName, ImageId:ImageId,InstanceType:InstanceType,SG:SecurityGroups[],KeyName:KeyName   }" \
+  --output table
+
+list-routes = ec2 describe-route-tables \
+  --query "RouteTables[].{RouteTableId:RouteTableId, VpcId:VpcId, Name: Tags[?Key=='Name'].Value| [0], GatewayId: Routes[].{GatewayId:GatewayId,DestinationCidrBlock: DestinationCidrBlock} }  " \
+  --output table
 
 sg-rules = !f() { aws ec2 describe-security-groups \
     --query "SecurityGroups[].IpPermissions[].[FromPort,ToPort,IpProtocol,join(',',IpRanges[].CidrIp)]" \
     --group-id "$1" --output text; }; f
+
+delete-ami =
+  !f() {
+    snapshots=($(aws ec2 describe-images --image-ids "${1}" --query "Images[].BlockDeviceMappings[].Ebs.SnapshotId" --output text))
+    aws ec2 deregister-image --image-id "${1}"
+    for id in $snapshots
+    do
+      aws ec2 delete-snapshot --snapshot-id "${id}"
+    done
+  }; f
+
+sh =
+  !f() {
+    aws ssm start-session --target "${1}"
+  }; f
 
 tostring =
   !f() {
@@ -91,13 +156,24 @@ find-access-key = !f() {
       printf "\r%sSearching...$i" "${clear_to_eol}"
       result=$(aws iam list-access-keys --output text --user-name "${i}" --query "AccessKeyMetadata[?AccessKeyId=='${1}'].UserName";)
       if [ -n "${result}" ]; then
-         printf "\r%s%s is owned by %s.\n" "${lear_to_eol}" "$1" "${result}"
+         printf "\r%s%s is owned by %s.\n" "${clear_to_eol}" "$1" "${result}"
          break
       fi
     done
     if [ -z "${result}" ]; then
       printf "\r%sKey not found." "${clear_to_eol}"
     fi
+  }; f
+
+find-users-without-mfa =
+  !f() {
+    echo "Users withouth MFA enabled:"
+    for i in $(aws iam list-users --query "Users[?PasswordLastUsed].UserName" --output text); do
+      result=$(aws iam list-virtual-mfa-devices --query "length(VirtualMFADevices[?User.UserName=='${i}'])")
+      if [ "${result}" -eq "0" ]; then
+        echo "${i}"
+      fi
+    done
   }; f
 
 docker-ecr-login =
@@ -134,6 +210,138 @@ revoke-my-ip-all =
   !f() {
     aws revoke-my-ip ${1} all all
   }; f
+
+describe-stack-params =
+  !f() {
+    aws cloudformation describe-stacks --stack-name ${1} | jq -r '.Stacks[0].Parameters[] | .ParameterKey + "=" + .ParameterValue' | sort
+  }; f
+
+get-cfn-param-keys =
+  !f() {
+    stack_json=$(aws cloudformation describe-stacks --stack-name ${1})
+    echo ${stack_json} | jq -r '.Stacks[0].Parameters[] | .ParameterKey'
+  }; f
+
+set-cfn-params =
+  !f() {
+    stack_name=$1
+    shift
+    stack_params=$(aws get-cfn-param-keys $stack_name)
+
+    declare -a params
+
+    for i in "$@"
+    do
+      key=$(echo ${i%%=*} | cksum | cut -d' ' -f1)  # use cksum as sh array supports only integer indices
+      value=${i##*=}
+
+      params[$key]=$value
+    done
+
+    out_str=""
+
+    for param in $stack_params
+    do
+      param_index=$(echo ${param} | cksum | cut -d' ' -f1)
+
+      out_str="${out_str}ParameterKey=${param},"
+      if [ ${params[$param_index]+_} ]
+      then
+        out_str="${out_str}ParameterValue=\"${params[$param_index]}\""
+      else
+        out_str="${out_str}UsePreviousValue=true"
+      fi
+      out_str="${out_str} "
+    done
+
+    echo $out_str
+
+  }; f
+
+get-cfn-params =
+  !f() {
+    stack_json=$(aws cloudformation describe-stacks --stack-name ${1})
+    echo ${stack_json} | jq -r '.Stacks[0].Parameters[] | { (.ParameterKey): .ParameterValue }' | jq -sS add
+  }; f
+
+find-instances-in-sg =
+  !f() {
+    filter=${2:-Name}
+    for i in $(aws ec2 describe-instances --filters "Name=network-interface.group-id,Values=['${1}']" --query "Reservations[].Instances[].Tags[?Key == '${filter}'].Value[]" --output text)
+    do
+      echo ${i}
+    done
+  }; f
+
+find-ssh-open = ec2 describe-security-groups \
+  --filters Name=ip-permission.from-port,Values=22 \
+  --query "SecurityGroups[].{
+    GroupName: GroupName,
+    GroupId: GroupId,
+    IPs: IpPermissions[?to_string(FromPort) == '22'][IpRanges[].CidrIp][][]
+  }"
+
+delete-old-ecr-images =
+  !f() {
+    repository_name=${1}
+    leave_amount=${2:-10}
+    images=$(aws ecr describe-images --repository-name ${repository_name}) || exit $?
+    images_amount=$(echo ${images} | jq -r '.imageDetails | length')
+
+    [ "${images_amount}" -le "${leave_amount}" ] && echo "No old images found." && exit 255
+
+    delete_amount=$(expr ${images_amount} - ${leave_amount})
+
+    echo "Deleting ${delete_amount} image(s)"
+    image_digests=$(echo ${images} | jq -r '[(.imageDetails | sort_by(.imagePushedAt)[:'"${delete_amount}"'])[].imageDigest]|join(" imageDigest=")')
+
+    aws ecr batch-delete-image --repository-name ${repository_name} --image-ids imageDigest=${image_digests} || exit $?
+  }; f
+
+describe-vpc-subnets =
+  !f() {
+    aws ec2 describe-subnets --filter="Name=vpc-id,Values=${1}" --query "Subnets[].{SubnetId: SubnetId, Name: Tags[?Key=='Name'].Value | [0], CidrBlock: CidrBlock}" | jq -r 'sort_by(.Name)'
+  }; f
+
+list-newest-ecr-images =
+  !f() {
+    repository_name=${1}
+    show_amount=${2:-10}
+    images=$(aws ecr describe-images --repository-name ${repository_name}) || exit $?
+    images_amount=$(echo ${images} | jq -r '.imageDetails | length')
+
+    (>&2 echo "Found ${images_amount} images. Showing newest ${show_amount}.")
+    echo ${images} | jq -r '[(.imageDetails | sort_by(-.imagePushedAt)[:'"${show_amount}"'])[] | { imagePushedAt: .imagePushedAt | strftime("%Y-%m-%dT%H:%M:%SZ"), imageTags }]'
+  }; f
+
+get-asg-instance-ips =
+  !f() {
+    asg_name=${1}
+    aws ec2 describe-instances --filters "Name=tag:aws:autoscaling:groupName,Values=${asg_name}" | jq -r '.Reservations[].Instances[].PrivateIpAddress'
+  }; f
+
+find-host-by-instance-id =
+  !f() {
+    instance_id=${1}
+    aws ec2 describe-instances --filters "Name=instance-id,Values=${instance_id}" | jq -r '.Reservations[].Instances[].PrivateIpAddress' | sed -E 's/\./-/g; s/^/ip-/'
+  }; f
+
+find-untagged-stacks =
+  !f() {
+    # use tag key as a parameter
+    aws cloudformation describe-stacks | jq -r '.Stacks[] | del(select(.Tags[].Key == "'$1'")) | select(.StackName != null) | .StackName'
+  }; f
+
+find-instance-by-public-ip =
+  !f() {
+    aws ec2 describe-instances --filters "Name=ip-address,Values=$1" | jq -r '.Reservations[].Instances[].Tags[] | select(.Key == "Name").Value'
+  }; f
+
+find-nat-gateway-by-public-ip =
+  !f() {
+    aws ec2 describe-nat-gateways | jq -r '.NatGateways[] | select(.NatGatewayAddresses[].PublicIp == "'$1'") | .Tags[] | select(.Key == "Name").Value'
+  }; f
+
 
 [command s3]
 
@@ -182,4 +390,75 @@ abort-incomplete-multipart-uploads =
     do
         aws s3api abort-multipart-upload --bucket ${1} ${l}";
     done
+  }; f
+
+size =
+  !f() {
+      aws s3api list-objects --bucket ${1}  --query "[sum(Contents[].Size), length(Contents[])]"
+  }; f
+
+cat =
+  !f() {
+    aws s3 cp "${1}" -
+  }; f
+
+head =
+   !f() {
+     aws s3 cp "${1}" - |\
+      head -n "${2}"
+   }; f
+
+[command ec2]
+
+get-vpc-id-by-name =
+  !f() {
+      aws ec2 describe-vpcs --filter "Name=tag:Name,Values=${1}" --query 'Vpcs[*].{id:VpcId}' --output text
+  }; f
+
+get-vpc-name-by-id =
+  !f() {
+      aws ec2 describe-vpcs --filter "Name=vpc-id,Values=${1}" --query 'Vpcs[*].Tags[].Value' --output text
+  }; f
+
+instances-by-region =
+  !f() {
+    for region in $(aws ec2 describe-regions --query "Regions[*].RegionName" --output text | tr "\t" "\n" | grep "$1")
+      do
+        echo "\nListing Instances in region:'$region'..."
+        aws ec2 describe-instances --region $region \
+          --output table \
+          --query "Reservations[*].Instances[*].{
+                    Instance:InstanceId,
+                    Type:InstanceType,
+                    AZ:Placement.AvailabilityZone,
+                    KeyName:KeyName,
+                    Name:Tags[?Key==\`Name\`]|[0].Value,
+                    Project:Tags[?Key==\`project\`]|[0].Value,
+                    IP:PublicIpAddress,
+                    State:State.Name,
+                    CPUcores:CpuOptions.CoreCount,
+                    CPUThreads:CpuOptions.ThreadsPerCore
+                }"
+      done
+  }; f
+
+instances-by-name-tag =
+  !f() {
+    aws ec2 describe-instances \
+      --filters Name=tag:Name,Values="${1}" \
+      --query 'Reservations[].Instances[].[Tags[?Key==`Name`] | [0].Value,PrivateIpAddress,State.Name]' \
+      --output table
+  }; f
+
+running-instances = ec2 describe-instances \
+    --filter Name=instance-state-name,Values=running \
+    --output table \
+    --query 'Reservations[].Instances[].{ID: InstanceId,Hostname: PublicDnsName,PrivateIpAddress: PrivateIpAddress,Name: Tags[?Key==`Name`].Value | [0],Type: InstanceType, Platform: Platform || `Linux`}'
+
+[command ecr]
+
+retag =
+  !f() {
+    manifest=$(aws ecr batch-get-image --repository-name ${1} --image-ids imageTag=${2} --query "images[].imageManifest" --output text)
+    aws ecr put-image --repository-name ${1} --image-tag ${3} --image-manifest "$manifest"
   }; f
