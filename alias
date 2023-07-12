@@ -134,3 +134,52 @@ revoke-my-ip-all =
   !f() {
     aws revoke-my-ip ${1} all all
   }; f
+
+[command s3]
+
+delete-all-noncurrent-objects =
+  !f() {
+    aws s3api list-object-versions \
+      --bucket "${1}" \
+      --query 'Versions[?IsLatest == `false`][Key, VersionId]' \
+      --output text |\
+    grep -v "^None$" |\
+    while read -r k v
+    do
+      aws s3api delete-object --bucket "${1}" --key "${k}" --version-id "${v}"
+    done
+  }; f
+
+delete-noncurrent-objects =
+  !f() {
+    aws s3api list-object-versions \
+      --bucket "${1}" \
+      --prefix "${2}" \
+      --query 'Versions[?IsLatest == `false`][Key, VersionId]' \
+      --output text |\
+    grep -v "^None$" |\
+    while read -r k v
+    do
+      aws s3api delete-object --bucket "${1}" --key "${k}" --version-id "${v}"
+    done
+  }; f
+
+abort-all-incomplete-multipart-uploads =
+  !f() {
+    aws s3api list-multipart-uploads --bucket "${1}" |\
+    jq -r '.Uploads[] | "--key \"\(.Key)\" --upload-id \(.UploadId)"' |\
+    while read -r l
+    do
+        aws s3api abort-multipart-upload --bucket ${1} ${l}";
+    done
+  }; f
+
+abort-incomplete-multipart-uploads =
+  !f() {
+    aws s3api list-multipart-uploads --bucket "${1}" --prefix "${2}"|\
+    jq -r '.Uploads[] | "--key \"\(.Key)\" --upload-id \(.UploadId)"' |\
+    while read -r l
+    do
+        aws s3api abort-multipart-upload --bucket ${1} ${l}";
+    done
+  }; f
