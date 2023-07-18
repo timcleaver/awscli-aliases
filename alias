@@ -342,6 +342,93 @@ find-nat-gateway-by-public-ip =
     aws ec2 describe-nat-gateways | jq -r '.NatGateways[] | select(.NatGatewayAddresses[].PublicIp == "'$1'") | .Tags[] | select(.Key == "Name").Value'
   }; f
 
+list-service-endpoints =
+  !f() {
+    # get all the regions
+    aws ssm get-parameters-by-path \
+      --path /aws/service/global-infrastructure/regions --output json |\
+      jq '.Parameters[].Value' -r |\
+    while read -r region
+    do
+      # get the services in this region
+      aws ssm get-parameters-by-path \
+        --path /aws/service/global-infrastructure/regions/$region/services --output json | \
+      jq '.Parameters[].Name' -r |\
+      while read -r service
+      do
+        aws ssm get-parameter \
+          --name $service/endpoint \
+          --output json 2>/dev/null | \
+        jq '.Parameter.Value' -r
+      done 
+    done
+  }; f
+
+list-service-endpoints-by-region =
+  !f() {
+    # get all the regions
+    aws ssm get-parameters-by-path \
+      --path /aws/service/global-infrastructure/regions --output json |\
+      jq '.Parameters[].Value' -r |\
+    grep "$1" |\
+    while read -r region
+    do
+      # get the services in this region
+      aws ssm get-parameters-by-path \
+        --path /aws/service/global-infrastructure/regions/$region/services --output json | \
+      jq '.Parameters[].Name' -r |\
+      while read -r service
+      do
+        aws ssm get-parameter \
+          --name $service/endpoint \
+          --output json 2>/dev/null | \
+        jq '.Parameter.Value' -r
+      done 
+    done
+  }; f
+
+list-service-endpoints-by-region-and-service =
+  !f() {
+    # get all the regions
+    aws ssm get-parameters-by-path \
+      --path /aws/service/global-infrastructure/regions --output json |\
+      jq '.Parameters[].Value' -r |\
+    grep "$1" |\
+    while read -r region
+    do
+      # get the services in this region
+      aws ssm get-parameters-by-path \
+        --path /aws/service/global-infrastructure/regions/$region/services --output json | \
+      jq '.Parameters[].Name' -r |\
+      grep "$2" |\
+      while read -r service
+      do
+        aws ssm get-parameter \
+          --name $service/endpoint \
+          --output json 2>/dev/null | \
+        jq '.Parameter.Value' -r
+      done 
+    done
+  }; f
+
+list-service-endpoint-ips =
+  !f() {
+    aws list-service-endpoints |\
+    while read -r endpoint
+    do
+      nslookup $endpoint
+    done
+  }; f
+
+list-service-endpoint-ips-by-region =
+  !f() {
+    aws list-service-endpoints-by-region "$1" |\
+    while read -r endpoint
+    do
+      nslookup $endpoint
+    done
+  }; f
+
 
 [command s3]
 
