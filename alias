@@ -1,5 +1,9 @@
 [toplevel]
 
+# NOTE: not all calls are pagination safe. So for accounts
+#       with large numbers of resources, some of these aliases
+#       will not work. Use at your own risk!
+
 # shortcuts
 ag = apigateway
 as = autoscaling
@@ -14,6 +18,7 @@ whoami = sts get-caller-identity
 
 create-assume-role =
   !f() {
+    [ -n "$DEBUG" ] && set -x
     aws iam create-role --role-name "${1}" \
       --assume-role-policy-document \
         "{\"Statement\":[{\
@@ -75,7 +80,7 @@ list-subnets = ec2 describe-subnets \
 
 list-asg-settings = autoscaling describe-auto-scaling-groups \
   --query "AutoScalingGroups[].{MDesired:DesiredCapacity, ASGName:AutoScalingGroupName, Min:MinSize, Max:MaxSize, lbname:LoadBalancerNames, LCName:LaunchConfigurationName, HealthCheckType:HealthCheckType}" \
-  --output table   
+  --output table
 
 list-asg-instances = autoscaling describe-auto-scaling-groups \
   --query "AutoScalingGroups[].Instances[].{id:InstanceId, AZ:AvailabilityZone, HealthStatus:HealthStatus,LifecycleState:LifecycleState }" \
@@ -89,13 +94,22 @@ list-routes = ec2 describe-route-tables \
   --query "RouteTables[].{RouteTableId:RouteTableId, VpcId:VpcId, Name: Tags[?Key=='Name'].Value| [0], GatewayId: Routes[].{GatewayId:GatewayId,DestinationCidrBlock: DestinationCidrBlock} }  " \
   --output table
 
-sg-rules = !f() { aws ec2 describe-security-groups \
-    --query "SecurityGroups[].IpPermissions[].[FromPort,ToPort,IpProtocol,join(',',IpRanges[].CidrIp)]" \
-    --group-id "$1" --output text; }; f
+sg-rules =
+  !f() {
+    [ -n "$DEBUG" ] && set -x
+    aws ec2 describe-security-groups \
+      --query "SecurityGroups[].IpPermissions[].[FromPort,ToPort,IpProtocol,join(',',IpRanges[].CidrIp)]" \
+      --group-id "$1" \
+      --output text
+  }; f
 
 delete-ami =
   !f() {
-    snapshots=($(aws ec2 describe-images --image-ids "${1}" --query "Images[].BlockDeviceMappings[].Ebs.SnapshotId" --output text))
+    [ -n "$DEBUG" ] && set -x
+    snapshots=($(aws ec2 describe-images \
+      --image-ids "${1}" \
+      --query "Images[].BlockDeviceMappings[].Ebs.SnapshotId" \
+      --output text))
     aws ec2 deregister-image --image-id "${1}"
     for id in $snapshots
     do
@@ -105,32 +119,45 @@ delete-ami =
 
 sh =
   !f() {
+    [ -n "$DEBUG" ] && set -x
     aws ssm start-session --target "${1}"
   }; f
 
 tostring =
   !f() {
+    [ -n "$DEBUG" ] && set -x
     jp -f "${1}" 'to_string(@)'
   }; f
 
 tostring-with-jq =
   !f() {
+    [ -n "$DEBUG" ] && set -x
     cat "${1}" | jq 'tostring'
   }; f
 
 authorize-my-ip =
   !f() {
+    [ -n "$DEBUG" ] && set -x
     ip=$(aws myip)
-    aws ec2 authorize-security-group-ingress --group-id ${1} --cidr $ip/32 --protocol tcp --port 22
+    aws ec2 authorize-security-group-ingress \
+      --group-id "${1}" \
+      --cidr "$ip/32" \
+      --protocol tcp \
+      --port 22
   }; f
 
 get-group-id =
   !f() {
-    aws ec2 describe-security-groups --filters Name=group-name,Values=${1} --query SecurityGroups[0].GroupId --output text
+    [ -n "$DEBUG" ] && set -x
+    aws ec2 describe-security-groups \
+      --filters "Name=group-name,Values=${1}" \
+      --query 'SecurityGroups[0].GroupId' \
+      --output text
   }; f
 
 authorize-my-ip-by-name =
   !f() {
+    [ -n "$DEBUG" ] && set -x
     group_id=$(aws get-group-id "${1}")
     aws authorize-my-ip "$group_id"
   }; f
@@ -148,25 +175,40 @@ public-ports = ec2 describe-security-groups \
   }'
 
 # List or set your region
-region = !f() { [[ $# -eq 1 ]] && aws configure set region "$1" || aws configure get region; }; f
+region =
+  !f() {
+    [ -n "$DEBUG" ] && set -x
+    [[ $# -eq 1 ]] \
+      && aws configure set region "$1" \
+      || aws configure get region;
+  }; f
 
-find-access-key = !f() {
+find-access-key =
+  !f() {
+    [ -n "$DEBUG" ] && set -x
     clear_to_eol=$(tput el)
-    for i in $(aws iam list-users --query "Users[].UserName" --output text); do
+    for i in $(aws iam list-users --query "Users[].UserName" --output text)
+    do
       printf "\r%sSearching...$i" "${clear_to_eol}"
-      result=$(aws iam list-access-keys --output text --user-name "${i}" --query "AccessKeyMetadata[?AccessKeyId=='${1}'].UserName";)
-      if [ -n "${result}" ]; then
+      result=$(aws iam list-access-keys \
+        --output text \
+        --user-name "${i}" \
+        --query "AccessKeyMetadata[?AccessKeyId=='${1}'].UserName";)
+      if [ -n "${result}" ]
+      then
          printf "\r%s%s is owned by %s.\n" "${clear_to_eol}" "$1" "${result}"
          break
       fi
     done
-    if [ -z "${result}" ]; then
+    if [ -z "${result}" ]
+    then
       printf "\r%sKey not found." "${clear_to_eol}"
     fi
   }; f
 
 find-users-without-mfa =
   !f() {
+    [ -n "$DEBUG" ] && set -x
     echo "Users withouth MFA enabled:"
     for i in $(aws iam list-users --query "Users[?PasswordLastUsed].UserName" --output text); do
       result=$(aws iam list-virtual-mfa-devices --query "length(VirtualMFADevices[?User.UserName=='${i}'])")
@@ -178,52 +220,80 @@ find-users-without-mfa =
 
 docker-ecr-login =
   !f() {
+    [ -n "$DEBUG" ] && set -x
     region=$(aws configure get region)
-    endpoint=$(aws ecr get-authorization-token --region $region --output text --query authorizationData[].proxyEndpoint)
-    passwd=$(aws ecr get-authorization-token --region $region --output text --query authorizationData[].authorizationToken | base64 --decode | cut -d: -f2)
+    endpoint=$(aws ecr get-authorization-token \
+      --region $region \
+      --output text \
+      --query authorizationData[].proxyEndpoint)
+    passwd=$(aws ecr get-authorization-token \
+        --region $region \
+        --output text \
+        --query authorizationData[].authorizationToken |\
+      base64 --decode |\
+      cut -d: -f2)
     docker login -u AWS -p $passwd $endpoint
   }; f
 
 myip =
   !f() {
+    [ -n "$DEBUG" ] && set -x
     dig +short myip.opendns.com @resolver1.opendns.com
   }; f
 
 allow-my-ip =
   !f() {
+    [ -n "$DEBUG" ] && set -x
     my_ip=$(aws myip)
-    aws ec2 authorize-security-group-ingress --group-name ${1} --protocol ${2} --port ${3} --cidr $my_ip/32
+    aws ec2 authorize-security-group-ingress \
+      --group-name "${1}" \
+      --protocol "${2}" \
+      --port "${3}" \
+      --cidr "$my_ip/32"
   }; f
 
 revoke-my-ip =
   !f() {
+    [ -n "$DEBUG" ] && set -x
     my_ip=$(aws myip)
-    aws ec2 revoke-security-group-ingress --group-name ${1} --protocol ${2} --port ${3} --cidr $my_ip/32
+    aws ec2 revoke-security-group-ingress \
+      --group-name "${1}" \
+      --protocol "${2}" \
+      --port "${3}" \
+      --cidr "$my_ip/32"
   }; f
 
 allow-my-ip-all =
   !f() {
-    aws allow-my-ip ${1} all all
+    [ -n "$DEBUG" ] && set -x
+    aws allow-my-ip "${1}" all all
   }; f
 
 revoke-my-ip-all =
   !f() {
-    aws revoke-my-ip ${1} all all
+    [ -n "$DEBUG" ] && set -x
+    aws revoke-my-ip "${1}" all all
   }; f
 
 describe-stack-params =
   !f() {
-    aws cloudformation describe-stacks --stack-name ${1} | jq -r '.Stacks[0].Parameters[] | .ParameterKey + "=" + .ParameterValue' | sort
+    [ -n "$DEBUG" ] && set -x
+    aws cloudformation describe-stacks \
+        --stack-name "${1}" |\
+      jq -r '.Stacks[0].Parameters[] | .ParameterKey + "=" + .ParameterValue' |\
+      sort
   }; f
 
 get-cfn-param-keys =
   !f() {
+    [ -n "$DEBUG" ] && set -x
     stack_json=$(aws cloudformation describe-stacks --stack-name ${1})
     echo ${stack_json} | jq -r '.Stacks[0].Parameters[] | .ParameterKey'
   }; f
 
 set-cfn-params =
   !f() {
+    [ -n "$DEBUG" ] && set -x
     stack_name=$1
     shift
     stack_params=$(aws get-cfn-param-keys $stack_name)
@@ -260,14 +330,21 @@ set-cfn-params =
 
 get-cfn-params =
   !f() {
+    [ -n "$DEBUG" ] && set -x
     stack_json=$(aws cloudformation describe-stacks --stack-name ${1})
-    echo ${stack_json} | jq -r '.Stacks[0].Parameters[] | { (.ParameterKey): .ParameterValue }' | jq -sS add
+    echo ${stack_json} |\
+      jq -r '.Stacks[0].Parameters[] | { (.ParameterKey): .ParameterValue }' |\
+      jq -sS add
   }; f
 
 find-instances-in-sg =
   !f() {
+    [ -n "$DEBUG" ] && set -x
     filter=${2:-Name}
-    for i in $(aws ec2 describe-instances --filters "Name=network-interface.group-id,Values=['${1}']" --query "Reservations[].Instances[].Tags[?Key == '${filter}'].Value[]" --output text)
+    for i in $(aws ec2 describe-instances \
+        --filters "Name=network-interface.group-id,Values=['${1}']" \
+        --query "Reservations[].Instances[].Tags[?Key == '${filter}'].Value[]" \
+        --output text)
     do
       echo ${i}
     done
@@ -283,6 +360,7 @@ find-ssh-open = ec2 describe-security-groups \
 
 delete-old-ecr-images =
   !f() {
+    [ -n "$DEBUG" ] && set -x
     repository_name=${1}
     leave_amount=${2:-10}
     images=$(aws ecr describe-images --repository-name ${repository_name}) || exit $?
@@ -295,16 +373,23 @@ delete-old-ecr-images =
     echo "Deleting ${delete_amount} image(s)"
     image_digests=$(echo ${images} | jq -r '[(.imageDetails | sort_by(.imagePushedAt)[:'"${delete_amount}"'])[].imageDigest]|join(" imageDigest=")')
 
-    aws ecr batch-delete-image --repository-name ${repository_name} --image-ids imageDigest=${image_digests} || exit $?
+    aws ecr batch-delete-image \
+      --repository-name ${repository_name} \
+      --image-ids imageDigest=${image_digests} || exit $?
   }; f
 
 describe-vpc-subnets =
   !f() {
-    aws ec2 describe-subnets --filter="Name=vpc-id,Values=${1}" --query "Subnets[].{SubnetId: SubnetId, Name: Tags[?Key=='Name'].Value | [0], CidrBlock: CidrBlock}" | jq -r 'sort_by(.Name)'
+    [ -n "$DEBUG" ] && set -x
+    aws ec2 describe-subnets \
+        --filter="Name=vpc-id,Values=${1}" \
+        --query "Subnets[].{SubnetId: SubnetId, Name: Tags[?Key=='Name'].Value | [0], CidrBlock: CidrBlock}" |\
+      jq -r 'sort_by(.Name)'
   }; f
 
 list-newest-ecr-images =
   !f() {
+    [ -n "$DEBUG" ] && set -x
     repository_name=${1}
     show_amount=${2:-10}
     images=$(aws ecr describe-images --repository-name ${repository_name}) || exit $?
@@ -316,117 +401,134 @@ list-newest-ecr-images =
 
 get-asg-instance-ips =
   !f() {
+    [ -n "$DEBUG" ] && set -x
     asg_name=${1}
-    aws ec2 describe-instances --filters "Name=tag:aws:autoscaling:groupName,Values=${asg_name}" | jq -r '.Reservations[].Instances[].PrivateIpAddress'
+    aws ec2 describe-instances \
+        --filters "Name=tag:aws:autoscaling:groupName,Values=${asg_name}" |\
+      jq -r '.Reservations[].Instances[].PrivateIpAddress'
   }; f
 
 find-host-by-instance-id =
   !f() {
+    [ -n "$DEBUG" ] && set -x
     instance_id=${1}
-    aws ec2 describe-instances --filters "Name=instance-id,Values=${instance_id}" | jq -r '.Reservations[].Instances[].PrivateIpAddress' | sed -E 's/\./-/g; s/^/ip-/'
+    aws ec2 describe-instances \
+        --filters "Name=instance-id,Values=${instance_id}" |\
+      jq -r '.Reservations[].Instances[].PrivateIpAddress' |\
+      sed -E 's/\./-/g; s/^/ip-/'
   }; f
 
 find-untagged-stacks =
   !f() {
+    [ -n "$DEBUG" ] && set -x
     # use tag key as a parameter
-    aws cloudformation describe-stacks | jq -r '.Stacks[] | del(select(.Tags[].Key == "'$1'")) | select(.StackName != null) | .StackName'
+    aws cloudformation describe-stacks |\
+      jq -r '.Stacks[] | del(select(.Tags[].Key == "'$1'")) | select(.StackName != null) | .StackName'
   }; f
 
 find-instance-by-public-ip =
   !f() {
-    aws ec2 describe-instances --filters "Name=ip-address,Values=$1" | jq -r '.Reservations[].Instances[].Tags[] | select(.Key == "Name").Value'
+    [ -n "$DEBUG" ] && set -x
+    aws ec2 describe-instances \
+        --filters "Name=ip-address,Values=$1" |\
+      jq -r '.Reservations[].Instances[].Tags[] | select(.Key == "Name").Value'
   }; f
 
 find-nat-gateway-by-public-ip =
   !f() {
-    aws ec2 describe-nat-gateways | jq -r '.NatGateways[] | select(.NatGatewayAddresses[].PublicIp == "'$1'") | .Tags[] | select(.Key == "Name").Value'
+    [ -n "$DEBUG" ] && set -x
+    aws ec2 describe-nat-gateways |\
+      jq -r '.NatGateways[] | select(.NatGatewayAddresses[].PublicIp == "'$1'") | .Tags[] | select(.Key == "Name").Value'
   }; f
 
 list-service-endpoints =
   !f() {
+    [ -n "$DEBUG" ] && set -x
     # get all the regions
     aws ssm get-parameters-by-path \
-      --path /aws/service/global-infrastructure/regions --output json |\
+        --path /aws/service/global-infrastructure/regions \
+        --output json |\
       jq '.Parameters[].Value' -r |\
-    while read -r region
-    do
-      # get the services in this region
-      aws ssm get-parameters-by-path \
-        --path /aws/service/global-infrastructure/regions/$region/services --output json | \
-      jq '.Parameters[].Name' -r |\
-      while read -r service
+      while read -r region
       do
-        aws ssm get-parameter \
-          --name $service/endpoint \
-          --output json 2>/dev/null | \
-        jq '.Parameter.Value' -r
-      done 
-    done
+        # get the services in this region
+        aws ssm get-parameters-by-path \
+            --path /aws/service/global-infrastructure/regions/$region/services \
+            --output json |\
+          jq '.Parameters[].Name' -r |\
+          while read -r service
+          do
+            aws ssm get-parameter \
+                --name $service/endpoint \
+                --output json 2>/dev/null |\
+              jq '.Parameter.Value' -r
+          done 
+      done
   }; f
 
 list-service-endpoints-by-region =
   !f() {
+    [ -n "$DEBUG" ] && set -x
     # get all the regions
     aws ssm get-parameters-by-path \
-      --path /aws/service/global-infrastructure/regions --output json |\
+        --path /aws/service/global-infrastructure/regions \
+        --output json |\
       jq '.Parameters[].Value' -r |\
-    grep "$1" |\
-    while read -r region
-    do
-      # get the services in this region
-      aws ssm get-parameters-by-path \
-        --path /aws/service/global-infrastructure/regions/$region/services --output json | \
-      jq '.Parameters[].Name' -r |\
-      while read -r service
+      grep "$1" |\
+      while read -r region
       do
-        aws ssm get-parameter \
-          --name $service/endpoint \
-          --output json 2>/dev/null | \
-        jq '.Parameter.Value' -r
-      done 
-    done
+        # get the services in this region
+        aws ssm get-parameters-by-path \
+            --path /aws/service/global-infrastructure/regions/$region/services \
+            --output json |\
+          jq '.Parameters[].Name' -r |\
+          while read -r service
+          do
+            aws ssm get-parameter \
+                --name $service/endpoint \
+                --output json 2>/dev/null |\
+              jq '.Parameter.Value' -r
+          done
+      done
   }; f
 
 list-service-endpoints-by-region-and-service =
   !f() {
+    [ -n "$DEBUG" ] && set -x
     # get all the regions
     aws ssm get-parameters-by-path \
-      --path /aws/service/global-infrastructure/regions --output json |\
+        --path /aws/service/global-infrastructure/regions \
+        --output json |\
       jq '.Parameters[].Value' -r |\
-    grep "$1" |\
-    while read -r region
-    do
-      # get the services in this region
-      aws ssm get-parameters-by-path \
-        --path /aws/service/global-infrastructure/regions/$region/services --output json | \
-      jq '.Parameters[].Name' -r |\
-      grep "$2" |\
-      while read -r service
+      grep "$1" |\
+      while read -r region
       do
-        aws ssm get-parameter \
-          --name $service/endpoint \
-          --output json 2>/dev/null | \
-        jq '.Parameter.Value' -r
-      done 
-    done
+        # get the services in this region
+        aws ssm get-parameters-by-path \
+            --path /aws/service/global-infrastructure/regions/$region/services 
+            --output json |\
+          jq '.Parameters[].Name' -r |\
+          grep "$2" |\
+          while read -r service
+          do
+            aws ssm get-parameter \
+                --name $service/endpoint \
+                --output json 2>/dev/null |\
+              jq '.Parameter.Value' -r
+          done
+      done
   }; f
 
 list-service-endpoint-ips =
   !f() {
-    aws list-service-endpoints |\
-    while read -r endpoint
-    do
-      nslookup $endpoint
-    done
+    [ -n "$DEBUG" ] && set -x
+    aws list-service-endpoints | xargs -r -x -n1 nslookup
   }; f
 
 list-service-endpoint-ips-by-region =
   !f() {
-    aws list-service-endpoints-by-region "$1" |\
-    while read -r endpoint
-    do
-      nslookup $endpoint
-    done
+    [ -n "$DEBUG" ] && set -x
+    aws list-service-endpoints-by-region "$1" | xargs -r -x -n1 nslookup
   }; f
 
 
@@ -434,6 +536,7 @@ list-service-endpoint-ips-by-region =
 
 empty-bucket =
   !f() {
+    [ -n "$DEBUG" ] && set -x
     aws s3api delete-objects --bucket "${1}" \
       --delete "$(aws s3api list-object-versions \
         --bucket "${1}" \
@@ -443,81 +546,106 @@ empty-bucket =
 
 delete-all-noncurrent-objects =
   !f() {
+    [ -n "$DEBUG" ] && set -x
     aws s3api list-object-versions \
-      --bucket "${1}" \
-      --query 'Versions[?IsLatest == `false`][Key, VersionId]' \
-      --output text |\
-    grep -v "^None$" |\
-    while read -r k v
-    do
-      aws s3api delete-object --bucket "${1}" --key "${k}" --version-id "${v}"
-    done
+        --bucket "${1}" \
+        --query 'Versions[?IsLatest == `false`][Key, VersionId]' \
+        --output text |\
+      grep -v "^None$" |\
+      while read -r k v
+      do
+        aws s3api delete-object \
+          --bucket "${1}" \
+          --key "${k}" \
+          --version-id "${v}"
+      done
   }; f
 
 delete-noncurrent-objects =
   !f() {
+    [ -n "$DEBUG" ] && set -x
     aws s3api list-object-versions \
-      --bucket "${1}" \
-      --prefix "${2}" \
-      --query 'Versions[?IsLatest == `false`][Key, VersionId]' \
-      --output text |\
-    grep -v "^None$" |\
-    while read -r k v
-    do
-      aws s3api delete-object --bucket "${1}" --key "${k}" --version-id "${v}"
-    done
+        --bucket "${1}" \
+        --prefix "${2}" \
+        --query 'Versions[?IsLatest == `false`][Key, VersionId]' \
+        --output text |\
+      grep -v "^None$" |\
+      while read -r k v
+      do
+        aws s3api delete-object \
+          --bucket "${1}" \
+          --key "${k}" \
+          --version-id "${v}"
+      done
   }; f
 
 abort-all-incomplete-multipart-uploads =
   !f() {
+    [ -n "$DEBUG" ] && set -x
     aws s3api list-multipart-uploads --bucket "${1}" |\
-    jq -r '.Uploads[] | "--key \"\(.Key)\" --upload-id \(.UploadId)"' |\
-    while read -r l
-    do
-        aws s3api abort-multipart-upload --bucket ${1} ${l}";
-    done
+      jq -r '.Uploads[] | "--key \"\(.Key)\" --upload-id \(.UploadId)"' |\
+      while read -r l
+      do
+          aws s3api abort-multipart-upload --bucket ${1} ${l}";
+      done
   }; f
 
 abort-incomplete-multipart-uploads =
   !f() {
-    aws s3api list-multipart-uploads --bucket "${1}" --prefix "${2}"|\
-    jq -r '.Uploads[] | "--key \"\(.Key)\" --upload-id \(.UploadId)"' |\
-    while read -r l
-    do
-        aws s3api abort-multipart-upload --bucket ${1} ${l}";
-    done
+    [ -n "$DEBUG" ] && set -x
+    aws s3api list-multipart-uploads \
+        --bucket "${1}" \
+        --prefix "${2}" |\
+      jq -r '.Uploads[] | "--key \"\(.Key)\" --upload-id \(.UploadId)"' |\
+      while read -r l
+      do
+          aws s3api abort-multipart-upload --bucket ${1} ${l}";
+      done
   }; f
 
 size =
   !f() {
-      aws s3api list-objects --bucket ${1}  --query "[sum(Contents[].Size), length(Contents[])]"
+    [ -n "$DEBUG" ] && set -x
+      aws s3api list-objects \
+        --bucket ${1} \
+        --query "[sum(Contents[].Size), length(Contents[])]"
   }; f
 
 cat =
   !f() {
+    [ -n "$DEBUG" ] && set -x
     aws s3 cp "${1}" -
   }; f
 
 head =
-   !f() {
-     aws s3 cp "${1}" - |\
-      head -n "${2}"
+  !f() {
+    [ -n "$DEBUG" ] && set -x
+    aws s3 cp "${1}" - | head -n "${2}"
    }; f
 
 [command ec2]
 
 get-vpc-id-by-name =
   !f() {
-      aws ec2 describe-vpcs --filter "Name=tag:Name,Values=${1}" --query 'Vpcs[*].{id:VpcId}' --output text
+    [ -n "$DEBUG" ] && set -x
+    aws ec2 describe-vpcs \
+      --filter "Name=tag:Name,Values=${1}" \
+      --query 'Vpcs[*].{id:VpcId}' \
+      --output text
   }; f
 
 get-vpc-name-by-id =
   !f() {
-      aws ec2 describe-vpcs --filter "Name=vpc-id,Values=${1}" --query 'Vpcs[*].Tags[].Value' --output text
+    [ -n "$DEBUG" ] && set -x
+    aws ec2 describe-vpcs \
+      --filter "Name=vpc-id,Values=${1}" \
+      --query 'Vpcs[*].Tags[].Value' \
+      --output text
   }; f
 
 instances-by-region =
   !f() {
+    [ -n "$DEBUG" ] && set -x
     for region in $(aws ec2 describe-regions --query "Regions[*].RegionName" --output text | tr "\t" "\n" | grep "$1")
       do
         echo "\nListing Instances in region:'$region'..."
@@ -540,6 +668,7 @@ instances-by-region =
 
 instances-by-name-tag =
   !f() {
+    [ -n "$DEBUG" ] && set -x
     aws ec2 describe-instances \
       --filters Name=tag:Name,Values="${1}" \
       --query 'Reservations[].Instances[].[Tags[?Key==`Name`] | [0].Value,PrivateIpAddress,State.Name]' \
@@ -555,6 +684,84 @@ running-instances = ec2 describe-instances \
 
 retag =
   !f() {
-    manifest=$(aws ecr batch-get-image --repository-name ${1} --image-ids imageTag=${2} --query "images[].imageManifest" --output text)
-    aws ecr put-image --repository-name ${1} --image-tag ${3} --image-manifest "$manifest"
+    [ -n "$DEBUG" ] && set -x
+    manifest=$(aws ecr batch-get-image \
+        --repository-name ${1} \
+        --image-ids imageTag=${2} \
+        --query "images[].imageManifest" \
+        --output text)
+    aws ecr put-image \
+      --repository-name ${1} \
+      --image-tag ${3} \
+      --image-manifest "$manifest"
+  }; f
+
+[command iam]
+
+find-policy-by-name =
+  !f() {
+    [ -n "$DEBUG" ] && set -x
+    aws iam list-policies \
+      --query "Policies[?PolicyName == \`$1\`]"
+  }; f
+
+remove-policy-by-name =
+  !f() {
+    [ -n "$DEBUG" ] && set -x
+    arn=$(aws iam find-policy-by-name "$1" | jq -r '.[].Arn')
+    [ -z "$arn" ] && return 1
+    aws iam list-entities-for-policy \
+        --policy-arn "$arn" \
+        --query 'PolicyGroups[].GroupName' \
+        --output text |\
+      xargs -x -r -n1 aws iam detach-group-policy \
+        --policy-arn "$arn" \
+        --group-name &
+    aws iam list-entities-for-policy \
+        --policy-arn "$arn" \
+        --query 'PolicyRoles[].RoleName' \
+        --output text |\
+      xargs -x -r -n1 aws iam detach-role-policy \
+        --policy-arn "$arn" \
+        --role-name &
+    aws iam list-entities-for-policy \
+        --policy-arn "$arn" \
+        --query 'PolicyUsers[].UserName' \
+        --output text |\
+      xargs -x -r -n1 aws iam detach-user-policy \
+        --policy-arn "$arn" \
+        --user-name &
+    aws iam list-policy-versions \
+        --policy-arn "$arn" \
+        --query 'Versions[?IsDefaultVersion == `false`].VersionId' \
+        --output text |\
+      xargs -x -r -n1 aws iam delete-policy-version \
+        --policy-arn "$arn" \
+        --version-id &
+    wait
+    aws iam delete-policy --policy-arn "$arn"
+  }; f
+
+remove-role-by-name =
+  !f() {
+    [ -n "$DEBUG" ] && set -x
+    aws iam list-role-policies \
+        --role-name "$1" \
+        --query 'PolicyNames' \
+        --output text |\
+      xargs -x -r -n1 aws iam delete-role-policy --role-name "$1" --policy-name &
+    aws iam list-attached-role-policies \
+        --role-name "$1" \
+        --query 'AttachedPolicies[].PolicyArn' \
+        --output text |\
+      xargs -x -r -n1 aws iam detach-role-policy --role-name "$1" --policy-arn &
+    aws iam list-instance-profiles-for-role \
+        --role-name "$1" \
+        --query 'InstanceProfiles[].InstanceProfileName' \
+        --output text |\
+      xargs -x -r -n1 aws iam remove-role-from-instance-profile \
+        --role-name "$1" \
+        --instance-profile-name &
+    wait
+    aws iam delete-role --role-name "$1"
   }; f
