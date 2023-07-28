@@ -534,14 +534,26 @@ list-service-endpoint-ips-by-region =
 
 [command s3]
 
+bucket-is-empty =
+  !f() {
+    [ -n "$DEBUG" ] && set -x
+    [ "" == "$(aws s3api list-objects-v2 --bucket $1 --max-items 1)" ]
+  }; f
+
 empty-bucket =
   !f() {
     [ -n "$DEBUG" ] && set -x
-    aws s3api delete-objects --bucket "${1}" \
-      --delete "$(aws s3api list-object-versions \
-        --bucket "${1}" \
-        --output=json \
-        --query='{Objects: Versions[].{Key:Key,VersionId:VersionId}}')"
+    aws s3 bucket-is-empty "${1}" || \
+      aws s3api delete-objects --bucket "${1}" \
+        --delete "$(aws s3api list-object-versions \
+          --bucket "${1}" \
+          --output=json \
+          --query='{
+            Objects: Versions[].{
+              Key:Key,
+              VersionId:VersionId
+            }
+          }')"
   }; f
 
 delete-all-noncurrent-objects =
